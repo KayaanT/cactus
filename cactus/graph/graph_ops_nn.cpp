@@ -1959,14 +1959,14 @@ void compute_lstm_cell_node(GraphNode& node, const std::vector<std::unique_ptr<G
     node.output_buffer.precision = Precision::FP16;
     node.output_buffer.allocate();
 
-    std::vector<__fp16> h_new_temp(batch_size * hidden_size);
-    std::vector<__fp16> c_new_temp(batch_size * hidden_size);
+    alignas(16) __fp16 h_new_temp[512];
+    alignas(16) __fp16 c_new_temp[512];
 
     cactus_lstm_cell_f16(
         x_input, h_prev, c_prev,
         weight_ih, weight_hh,
         bias_ih, bias_hh,
-        h_new_temp.data(), c_new_temp.data(),
+        h_new_temp, c_new_temp,
         batch_size, input_size, hidden_size
     );
 

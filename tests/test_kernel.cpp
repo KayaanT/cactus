@@ -2,8 +2,10 @@
 #include <vector>
 #include <cmath>
 #include <iostream>
+#include <iomanip>
 #include <random>
 #include <algorithm>
+#include <chrono>
 
 bool test_neon_add_fp16_correctness() {
     const size_t size = 16;
@@ -429,6 +431,107 @@ bool test_int4_matmul_correctness() {
     return true;
 }
 
+bool test_lstm_cell_correctness() {
+    const size_t batch_size = 1;
+    const size_t input_size = 128;
+    const size_t hidden_size = 128;
+    const size_t gate_size = 4 * hidden_size;
+
+    std::random_device rd;
+    std::mt19937 gen(42);
+    std::uniform_real_distribution<float> dis(-0.5f, 0.5f);
+
+    std::vector<__fp16> x(batch_size * input_size);
+    std::vector<__fp16> h_prev(batch_size * hidden_size);
+    std::vector<__fp16> c_prev(batch_size * hidden_size);
+    std::vector<__fp16> weight_ih(gate_size * input_size);
+    std::vector<__fp16> weight_hh(gate_size * hidden_size);
+    std::vector<__fp16> bias_ih(gate_size);
+    std::vector<__fp16> bias_hh(gate_size);
+
+    for (auto* v : {&x, &h_prev, &c_prev, &weight_ih, &weight_hh, &bias_ih, &bias_hh}) {
+        for (size_t i = 0; i < v->size(); ++i) (*v)[i] = static_cast<__fp16>(dis(gen));
+    }
+
+    std::vector<__fp16> h_new(batch_size * hidden_size);
+    std::vector<__fp16> c_new(batch_size * hidden_size);
+
+    cactus_lstm_cell_f16(
+        x.data(), h_prev.data(), c_prev.data(),
+        weight_ih.data(), weight_hh.data(),
+        bias_ih.data(), bias_hh.data(),
+        h_new.data(), c_new.data(),
+        batch_size, input_size, hidden_size
+    );
+
+    bool has_nonzero_h = false, has_nonzero_c = false;
+    for (size_t i = 0; i < hidden_size; ++i) {
+        float hv = static_cast<float>(h_new[i]);
+        float cv = static_cast<float>(c_new[i]);
+        if (!std::isfinite(hv) || !std::isfinite(cv)) return false;
+        if (std::abs(hv) > 1e-6f) has_nonzero_h = true;
+        if (std::abs(cv) > 1e-6f) has_nonzero_c = true;
+    }
+    return has_nonzero_h && has_nonzero_c;
+}
+
+bool benchmark_lstm_cell() {
+    const size_t batch_size = 1;
+    const size_t input_size = 128;
+    const size_t hidden_size = 128;
+    const size_t gate_size = 4 * hidden_size;
+    const int warmup = 100;
+    const int iterations = 1000;
+
+    std::mt19937 gen(42);
+    std::uniform_real_distribution<float> dis(-0.5f, 0.5f);
+
+    std::vector<__fp16> x(batch_size * input_size);
+    std::vector<__fp16> h_prev(batch_size * hidden_size);
+    std::vector<__fp16> c_prev(batch_size * hidden_size);
+    std::vector<__fp16> weight_ih(gate_size * input_size);
+    std::vector<__fp16> weight_hh(gate_size * hidden_size);
+    std::vector<__fp16> bias_ih(gate_size);
+    std::vector<__fp16> bias_hh(gate_size);
+
+    for (auto* v : {&x, &h_prev, &c_prev, &weight_ih, &weight_hh, &bias_ih, &bias_hh}) {
+        for (size_t i = 0; i < v->size(); ++i) (*v)[i] = static_cast<__fp16>(dis(gen));
+    }
+
+    std::vector<__fp16> h_new(batch_size * hidden_size);
+    std::vector<__fp16> c_new(batch_size * hidden_size);
+
+    for (int i = 0; i < warmup; ++i) {
+        cactus_lstm_cell_f16(
+            x.data(), h_prev.data(), c_prev.data(),
+            weight_ih.data(), weight_hh.data(),
+            bias_ih.data(), bias_hh.data(),
+            h_new.data(), c_new.data(),
+            batch_size, input_size, hidden_size
+        );
+    }
+
+    auto start = std::chrono::high_resolution_clock::now();
+    for (int i = 0; i < iterations; ++i) {
+        cactus_lstm_cell_f16(
+            x.data(), h_prev.data(), c_prev.data(),
+            weight_ih.data(), weight_hh.data(),
+            bias_ih.data(), bias_hh.data(),
+            h_new.data(), c_new.data(),
+            batch_size, input_size, hidden_size
+        );
+    }
+    auto end = std::chrono::high_resolution_clock::now();
+    double total_us = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
+    double avg_us = total_us / iterations;
+
+    std::cout << "  LSTM cell (bs=1, in=128, hidden=128): "
+              << std::fixed << std::setprecision(2) << avg_us << " us/call"
+              << " (" << iterations << " iterations)" << std::endl;
+
+    return true;
+}
+
 bool test_stft_kernel_correctness() {
     const size_t N = 2, C_in = 1, L = 8, K = 4, stride = 2, num_fft_bins = 2;
     const size_t C_out = 2 * num_fft_bins;
@@ -491,6 +594,8 @@ int main() {
     runner.run_test("Kernel Grouped INT8 MatMul Correctness", test_matmul_int8_grouped_correctness());
     runner.run_test("Kernel INT4 MatMul Correctness", test_int4_matmul_correctness());
     runner.run_test("Kernel STFT Complex Correctness", test_stft_kernel_correctness());
+    runner.run_test("Kernel LSTM Cell Correctness", test_lstm_cell_correctness());
+    runner.run_test("Kernel LSTM Cell Benchmark", benchmark_lstm_cell());
 
     runner.print_summary();
     return runner.all_passed() ? 0 : 1;
